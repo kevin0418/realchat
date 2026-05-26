@@ -20,8 +20,8 @@ from langchain.prompts import PromptTemplate
 import os
 
 # 1. 초기 설정 및 API 키 입력
-st.set_page_config(page_subheader="Brisbane Real Estate AI Agent", layout="wide")
-st.page_title("🏡 Brisbane Real Estate Legal & Form AI")
+st.set_page_config(page_title="Brisbane Real Estate AI Agent", layout="wide")
+st.title("🏡 Brisbane Real Estate AI Q & A")
 st.caption("From Kevin Oh")
 
 api_key = os.getenv("GEMINI_API_KEY")
@@ -36,7 +36,7 @@ with st.sidebar:
     st.info("""
     **학습 대상 자료:**
     - 부동산 PDF 자료
-    - 정부 부동산 관련 PDF 자료를  DATA directory 에 넣어주세요.
+    - 정부 부동산 관련 PDF 자료 DATA directory 기준.
    
     """)
 
