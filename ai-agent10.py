@@ -24,7 +24,14 @@ st.set_page_config(page_title="Brisbane Real Estate AI Agent", layout="wide")
 st.title("🏡 Brisbane Real Estate AI Q & A")
 st.caption("From Kevin Oh")
 
-api_key = os.getenv("GEMINI_API_KEY")
+# 1. Properly read from Streamlit Secrets dashboard
+if "GEMINI_API_KEY" in st.secrets:
+    api_key = st.secrets["GEMINI_API_KEY"]
+else:
+    # Fallback for your local VS Code environment
+    api_key = os.getenv("GEMINI_API_KEY")
+
+#  api_key = os.getenv("GEMINI_API_KEY")
 # 1. API 키 설정 (Google AI Studio에서 발급받은 키 입력)
 
 with st.sidebar:
