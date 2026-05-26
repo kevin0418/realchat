@@ -21,7 +21,7 @@ import os
 
 # 1. 초기 설정 및 API 키 입력
 st.set_page_config(page_subheader="Brisbane Real Estate AI Agent", layout="wide")
-st.subheader("🏡 Brisbane Real Estate Legal & Form AI")
+st.page_title("🏡 Brisbane Real Estate Legal & Form AI")
 st.caption("From Kevin Oh")
 
 api_key = os.getenv("GEMINI_API_KEY")
