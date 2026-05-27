@@ -26,7 +26,7 @@ st.caption("From Kevin Oh")
 
 # 1. Properly read from Streamlit Secrets dashboard
 if "GEMINI_API_KEY" in st.secrets:
-    api_key = st.secrets["GEMINI_API_KEY"]
+    api_key = st.secrets["api_keys"]["GEMINI_API_KEY"]
 else:
     # Fallback for your local VS Code environment
     api_key = os.getenv("GEMINI_API_KEY")
