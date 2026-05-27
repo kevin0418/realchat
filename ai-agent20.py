@@ -15,10 +15,16 @@ from langchain.prompts import PromptTemplate
 
 # 1. 초기 설정 및 API 키 입력
 st.set_page_config(page_title="호주 부동산 질문 by upload files", layout="wide")
-st.subheader("🏡 호주 부동산 질문 by upload files")
+st.title("🏡 호주 부동산 질문 by upload files")
 st.caption("From Kevin Oh")
 
-api_key = os.getenv("GEMINI_API_KEY")
+if "api_keys" in st.secrets and "GEMINI_API_KEY" in st.secrets["api_keys"]:
+    api_key = st.secrets["api_keys"]["GEMINI_API_KEY"]
+else:
+    # 2. st.secrets에 없다면 Windows 환경변수에서 가져옴
+    api_key = os.getenv("GEMINI_API_KEY")
+
+# api_key = os.getenv("GEMINI_API_KEY")
 
 with st.sidebar:
     if api_key:
