@@ -66,4 +66,8 @@ uvicorn==0.54.0
 watchdog==6.0.0
 websockets==16.1.1
 xyzservices==2026.9.1
+pypdf
+openpyxl
+
+
 
