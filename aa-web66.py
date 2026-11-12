@@ -21,32 +21,38 @@ if not api_key:
 client = genai.Client(api_key=api_key)
 
 # 세션 상태 초기화
-if "processed_docs" not in st.session_state:
-    st.session_state.processed_docs = []
-if "file_manifest" not in st.session_state:
-    st.session_state.file_manifest = []
+if "active_contents" not in st.session_state:
+    st.session_state.active_contents = []
+if "loaded_count" not in st.session_state:
+    st.session_state.loaded_count = 0
 if "chat_history" not in st.session_state:
     st.session_state.chat_history = []
 if "summary_result" not in st.session_state:
     st.session_state.summary_result = ""
-if "detected_domain" not in st.session_state:
-    st.session_state.detected_domain = "일반"
 
-# --- 429 처리: 재시도 래퍼 함수 ---
-def call_gemini_with_retry(model: str, contents: list, max_retries: int = 3):
-    """429 Resource Exhausted 발생 시 안내 메시지와 함께 대기 후 자동 재시도"""
+# --- 429 처리 및 호출 함수 ---
+def call_gemini_with_retry(model: str, system_instruction: str, contents: list, max_retries: int = 3):
     status_placeholder = st.empty()
+    config = types.GenerateContentConfig(
+        system_instruction=system_instruction,
+        temperature=0.3
+    )
+    
     for attempt in range(max_retries):
         try:
-            response = client.models.generate_content(model=model, contents=contents)
+            response = client.models.generate_content(
+                model=model,
+                contents=contents,
+                config=config
+            )
             status_placeholder.empty()
             return response.text
         except ClientError as e:
             err_str = str(e)
             if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str:
-                wait_sec = 60  # 기본 대기 60초
+                wait_sec = 60
                 status_placeholder.warning(
-                    f"⚠️ Gemini 1분당 토큰 한도(100만 토큰)에 도달했습니다. "
+                    f"⚠️ Gemini 1분당 입력 토큰 한도(100만 토큰)에 도달했습니다. "
                     f"잠시 대기 후 자동으로 재시도합니다... (시도 {attempt + 1}/{max_retries}, 대기: {wait_sec}초)"
                 )
                 time.sleep(wait_sec)
@@ -57,34 +63,27 @@ def call_gemini_with_retry(model: str, contents: list, max_retries: int = 3):
             status_placeholder.empty()
             raise e
             
-    status_placeholder.error("❌ 재시도 횟수를 초과했습니다. 파일 크기나 개수를 줄여 다시 시도해주세요.")
+    status_placeholder.error("❌ 재시도 횟수를 초과했습니다. 업로드 파일 수를 줄여 다시 시도해주세요.")
     return None
 
-# --- 이미지 최적화 함수 (토큰 대폭 절감) ---
+# --- 이미지 최적화 함수 ---
 def resize_image_for_gemini(img_bytes: bytes, max_dimension: int = 1024) -> bytes:
-    """고해상도 도면/사진을 리사이즈 및 JPEG 압축하여 전송 토큰과 용량을 최적화"""
     try:
         image = Image.open(io.BytesIO(img_bytes))
-        # RGBA -> RGB 변환
         if image.mode in ("RGBA", "P"):
             image = image.convert("RGB")
-        
-        # 비율 유지 축소
         image.thumbnail((max_dimension, max_dimension), Image.Resampling.LANCZOS)
-        
         out_io = io.BytesIO()
         image.save(out_io, format="JPEG", quality=80, optimize=True)
         return out_io.getvalue()
     except Exception:
-        return img_bytes  # 실패 시 원본 유지
+        return img_bytes
 
 # --- 단일 파일 스트림 파싱 함수 ---
 def parse_txt_stream(file_stream) -> str:
     try:
         content = file_stream.read()
-        if isinstance(content, bytes):
-            return content.decode("utf-8", errors="ignore")
-        return str(content)
+        return content.decode("utf-8", errors="ignore") if isinstance(content, bytes) else str(content)
     except Exception as e:
         return f"[TXT 읽기 오류: {e}]"
 
@@ -93,10 +92,7 @@ def parse_docx_stream(file_stream) -> str:
         doc = Document(file_stream)
         content = [p.text for p in doc.paragraphs if p.text.strip()]
         for table in doc.tables:
-            table_data = []
-            for row in table.rows:
-                row_text = [cell.text.strip().replace("\n", " ") for cell in row.cells]
-                table_data.append(" | ".join(row_text))
+            table_data = [" | ".join([cell.text.strip().replace("\n", " ") for cell in row.cells]) for row in table.rows]
             if table_data:
                 content.append("\n[TABLE]\n" + "\n".join(table_data) + "\n[/TABLE]\n")
         return "\n".join(content)
@@ -123,49 +119,67 @@ def parse_pdf_stream(file_stream) -> str:
     except Exception as e:
         return f"[PDF 읽기 오류: {e}]"
 
-# --- 도메인 자동 판별 함수 ---
-def detect_data_domain(text_corpus: str) -> str:
-    snippet = text_corpus[:6000].lower()
-    real_estate_kw = ["zoning", "overlay", "council", "lease", "tenant", "land", "dwelling", "lot", "boundary", "property", "부동산", "임대", "조닝", "계약", "토지", "건물", "카운슬"]
-    religion_kw = ["god", "jesus", "lord", "church", "pastor", "bible", "prayer", "faith", "gospel", "하나님", "예수", "교회", "목사", "성경", "기도", "은혜", "말씀", "신앙", "설교"]
-    health_kw = ["patient", "doctor", "hospital", "clinic", "symptom", "treatment", "medicine", "diagnosis", "health", "환자", "병원", "진료", "증상", "치료", "약품", "건강", "의사", "혈압", "혈당"]
-
-    re_score = sum(snippet.count(w) for w in real_estate_kw)
-    rel_score = sum(snippet.count(w) for w in religion_kw)
-    health_score = sum(snippet.count(w) for w in health_kw)
-
-    scores = {"부동산 (Real Estate)": re_score, "종교/신앙 (Religion)": rel_score, "건강/의료 (Health)": health_score}
-    top_domain, top_score = max(scores.items(), key=lambda x: x[1])
-    return top_domain if top_score >= 3 else "일반 종합 문서 (General)"
-
-def get_domain_persona(domain: str) -> str:
-    if "부동산" in domain:
-        return (
-            "당신은 부동산, 도시계획(Planning Scheme), 상업용 리스 및 개발 규정 전문 컨설턴트입니다. "
-            "조닝(Zoning), 오버레이(Overlay), 부지 면적(Site Cover), 임대차 조건, 수치적 규제 조건을 매우 엄격하고 정밀하게 검토하여 답변하세요."
+# --- 4대 분야별 전문가 페르소나 및 요약 구조 ---
+def get_domain_config(domain: str):
+    if domain == "부동산, 법규":
+        expert_role = (
+            "당신은 호주(퀸즐랜드/브리즈번/로건) 및 일반 부동산 거래, 도시계획(City Plan / Planning Scheme), "
+            "조닝(Zoning), 오버레이(Overlay), 건폐율(Site Cover), 높이 제한, 셋백(Setback), 상업용 임대차(Commercial Lease) 및 부동산 법규에 정통한 수석 부동산 컨설턴트입니다. "
+            "실무적 규정, 수치, 예외 조건을 정확하고 체계적으로 설명하세요."
         )
-    elif "종교" in domain:
-        return (
-            "당신은 깊이 있는 영적 통찰과 신학적 문맥을 이해하는 종교/신앙 연구자입니다. "
-            "성경 구절 인용, 말씀의 본래 배경, 교훈적 의미 및 실천적 묵상 포인트를 따뜻하고 격조 높은 어조로 정리하세요."
+        summary_structure = """
+        위 자료를 [부동산, 법규] 전문가 관점에서 다음 4가지 항목으로 요약 보고서를 작성하세요:
+        1. **자료의 핵심 주제 및 개요**: 대상 부동산 또는 문서가 다루는 주요 부동산/시장/법규 내용
+        2. **주요 수치, 규제 및 핵심 조건**: 문서에 등장하는 가격, 임대료, 면적, 규제 기준, 전망치 등 핵심 데이터 정리
+        3. **실무적 시사점 및 주의사항**: 매매·임대·개발 관점에서 주목해야 할 포인트
+        4. **문서별 세부 내용 요약**: 업로드된 각 파일별 핵심 요약 및 출처 명시
+        """
+    elif domain == "종교, 철학":
+        expert_role = (
+            "당신은 깊이 있는 신학적 통찰, 경전 주해 능력, 동서양 철학 사조에 정통한 인문학 및 영성 연구자입니다. "
+            "핵심 교리, 철학적 명제, 경전 구절, 역사적 배경과 실천적 묵상 포인트를 깊이 있게 풀어내세요."
         )
-    elif "건강" in domain:
-        return (
-            "당신은 의학 지식과 건강 가이드를 객관적으로 정리해주는 건강 분석 비서입니다. "
-            "임상 수치, 복약 주의사항, 생활 습관 가이드라인을 명확하게 설명하되, 전문적인 의료 상담을 대체할 수 없다는 점을 균형 있게 짚어주세요."
+        summary_structure = """
+        위 자료를 [종교, 철학] 연구자 관점에서 다음 4가지 항목으로 깊이 있게 요약하세요:
+        1. **중심 주제 및 핵심 명제**: 자료 전체를 관통하는 본질적인 신학적·철학적 메시지
+        2. **주요 논지 전개 및 경전/원전 근거**: 핵심 논거의 흐름과 인용된 말씀/사상가/배경 정리
+        3. **영적 통찰 및 삶에의 적용점**: 내면적 성찰과 실천적 교훈
+        4. **자료별 세부 내용 요약**: 각 문서별 고유 내용과 출처 표기
+        """
+    elif domain == "건강, 의학":
+        expert_role = (
+            "당신은 임상 데이터, 건강검진 결과, 의학 논문 및 헬스케어 가이드를 객관적이고 체계적으로 분석하는 의료 정보 분석 전문가입니다. "
+            "검사 수치, 정상 참고치, 약물 정보, 이상 소견을 알기 쉽게 설명하세요. (의학적 조언 시 전문의 진료 권고 포함)"
         )
-    return "당신은 제공된 문서를 객관적으로 분석하여 질문에 충실하게 답하는 전문 지식 분석가입니다."
+        summary_structure = """
+        위 자료를 [건강, 의학] 분석 전문가 관점에서 다음 4가지 항목으로 명확하게 정리하세요:
+        1. **핵심 건강 상태 및 주요 소견 요약**: 전반적인 개요와 가장 주목해야 할 핵심 결과
+        2. **주요 검사 수치 및 기준치 비교**: 정상 범위 내 항목과 주의/이상 수치 대조
+        3. **처방/치료 계획 및 주의사항**: 복약 지도, 경고사항, 생활 습관 관리 지침
+        4. **자료별 세부 기록 요약**: 각 검사지/문서별 핵심 내용과 출처 명시
+        """
+    else:  # 기타
+        expert_role = (
+            "당신은 방대한 텍스트, 표(Excel/Word), 시각 자료(이미지)에서 핵심 인사이트를 도출하고 "
+            "폭넓은 배경지식을 바탕으로 명확한 해답을 제시하는 수석 지식 분석가입니다."
+        )
+        summary_structure = """
+        위 자료 전체를 검토하여 다음 4가지 항목으로 체계적인 종합 보고서를 작성하세요:
+        1. **자료의 핵심 목적 및 전체 개요**: 문서들이 다루는 주요 주제와 배경
+        2. **가장 중요한 핵심 내용 및 주요 수치/일정**: 반드시 파악해야 할 핵심 팩트 정리
+        3. **파일별 세부 요약**: 업로드된 각 문서 및 이미지별 주요 내용과 출처 명시
+        4. **시사점 및 후속 검토 필요 사항**: 자료를 바탕으로 도출되는 결론 및 추가 확인 포인트
+        """
+    return expert_role, summary_structure
 
-# --- 파일 목록 통합 처리기 ---
-def process_file_items(file_items):
-    manifest = []
-    text_corpus = []
-    image_parts = []
-
-    for item in file_items:
-        name = item["name"]
+# --- 업로드 파일 파싱 처리기 ---
+def parse_uploaded_files(uploaded_files):
+    combined_parts = []
+    valid_count = 0
+    for uf in uploaded_files:
+        name = uf.name
         ext = os.path.splitext(name)[1].lower()
-        stream = item["stream"]
+        stream = io.BytesIO(uf.read())
 
         if ext in [".txt", ".md"]:
             extracted = parse_txt_stream(stream)
@@ -178,11 +192,11 @@ def process_file_items(file_items):
         elif ext in [".jpg", ".jpeg", ".png"]:
             try:
                 raw_bytes = stream.read()
-                # 고해상도 이미지는 압축 및 리사이즈 적용
                 optimized_bytes = resize_image_for_gemini(raw_bytes, max_dimension=1024)
                 part = types.Part.from_bytes(data=optimized_bytes, mime_type="image/jpeg")
-                image_parts.append({"name": name, "part": part})
-                manifest.append({"name": name, "type": ext, "info": f"이미지 ({len(optimized_bytes)//1024} KB로 압축됨)"})
+                combined_parts.append(f"\n[IMAGE ATTACHMENT: {name}]\n")
+                combined_parts.append(part)
+                valid_count += 1
             except Exception as e:
                 st.warning(f"이미지 {name} 처리 실패: {e}")
             continue
@@ -190,118 +204,123 @@ def process_file_items(file_items):
             continue
 
         if extracted.strip():
-            manifest.append({"name": name, "type": ext, "info": f"{len(extracted):,}자"})
-            text_corpus.append(
+            formatted_text = (
                 f"=====================================================\n"
                 f"DOCUMENT: {name}\n"
                 f"TYPE: {ext}\n"
                 f"=====================================================\n"
                 f"{extracted}\n\n"
             )
+            combined_parts.append(formatted_text)
+            valid_count += 1
 
-    full_text_str = "".join(text_corpus)
-    combined_contents = []
-    if full_text_str:
-        combined_contents.append(full_text_str)
-    for img in image_parts:
-        combined_contents.append(f"\n[IMAGE ATTACHMENT: {img['name']}]\n")
-        combined_contents.append(img["part"])
+    return combined_parts, valid_count
 
-    detected = detect_data_domain(full_text_str)
-    return combined_contents, manifest, detected
+# --- 2단계 분리형 Q&A 엔진 ---
+def generate_hybrid_answer(domain: str, active_contents: list, query: str) -> str:
+    expert_role, _ = get_domain_config(domain)
+    
+    # [1단계] 첨부된 문서 내에서만 답변 가능 여부 판별 및 추출
+    doc_check_sys = (
+        "당신은 엄격한 문서 검색기입니다. 제공된 문서 안에 사용자 질문에 대한 직접적인 답이나 관련 정보가 있는지 확인하세요.\n"
+        "- 만약 관련 정보가 있다면 첫 줄에 반드시 'FOUND: YES'라고 쓰고, 이어서 문서 내용에 근거한 상세 답변과 [출처: 파일명]을 작성하세요.\n"
+        "- 만약 제공된 문서가 전혀 다른 주제의 문서이거나 질문에 답할 내용이 없다면, 다른 말은 절대 쓰지 말고 오직 'FOUND: NO' 한 단어만 출력하세요."
+    )
+    doc_check_contents = [
+        *active_contents,
+        f"\n\n[질문]: {query}"
+    ]
+    
+    step1_result = call_gemini_with_retry(
+        model="gemini-2.5-flash",
+        system_instruction=doc_check_sys,
+        contents=doc_check_contents
+    )
+    
+    if not step1_result:
+        return "응답을 생성하지 못했습니다. 다시 시도해주세요."
+
+    # [2단계 분기]
+    if step1_result.strip().startswith("FOUND: YES"):
+        clean_doc_answer = step1_result.replace("FOUND: YES", "", 1).strip()
+        return f"### 📄 제공된 자료 기반 답변\n\n{clean_doc_answer}"
+    else:
+        ai_fallback_sys = (
+            f"{expert_role}\n"
+            "사용자의 질문에 대해 당신이 보유한 전문 지식을 총동원하여 명확하고 체계적이며 실무적으로 도움이 되는 상세한 답변을 작성하세요."
+        )
+        ai_fallback_contents = [
+            f"다음 질문에 대해 [{domain}] 분야 전문가로서 상세하고 정확하게 답변해주세요:\n\n질문: {query}"
+        ]
+        
+        step2_result = call_gemini_with_retry(
+            model="gemini-2.5-flash",
+            system_instruction=ai_fallback_sys,
+            contents=ai_fallback_contents
+        )
+        
+        return (
+            "ℹ️ *제공된 자료에서는 해당 질문에 대한 직접적인 내용을 찾을 수 없어, AI 전문 지식으로 답변을 생성했습니다.*\n\n"
+            f"### 🤖 AI 답변 ({domain} 전문 지식 기반)\n\n{step2_result}"
+        )
 
 # --- 사이드바 ---
 with st.sidebar:
-    st.header("📂 입력 방식 선택")
-    input_mode = st.radio("자료 공급 방식", ["로컬 폴더 경로 지정", "개별 파일 직접 업로드"])
-    
-    ready_items = []
-    
-    if input_mode == "로컬 폴더 경로 지정":
-        folder_path = st.text_input("디렉터리 경로", value="./property_data")
-        if st.button("폴더 내 파일 일괄 읽기", use_container_width=True):
-            if os.path.isdir(folder_path):
-                valid_exts = {".txt", ".md", ".docx", ".xlsx", ".xls", ".pdf", ".jpg", ".jpeg", ".png"}
-                for root, _, files in os.walk(folder_path):
-                    for f in sorted(files):
-                        ext = os.path.splitext(f)[1].lower()
-                        if ext in valid_exts:
-                            fp = os.path.join(root, f)
-                            with open(fp, "rb") as fh:
-                                ready_items.append({"name": f, "stream": io.BytesIO(fh.read())})
-            else:
-                st.error("올바른 디렉터리 경로를 입력하세요.")
-    else:
-        uploaded_files = st.file_uploader(
-            "파일들을 선택하거나 끌어다 놓으세요",
-            type=["txt", "md", "docx", "xlsx", "xls", "pdf", "jpg", "jpeg", "png"],
-            accept_multiple_files=True
-        )
-        if st.button("업로드된 파일 처리 시작", use_container_width=True):
-            if uploaded_files:
-                for uf in uploaded_files:
-                    ready_items.append({"name": uf.name, "stream": io.BytesIO(uf.read())})
-            else:
-                st.warning("업로드된 파일이 없습니다.")
+    st.header("1️⃣ 분석 분야 선택")
+    selected_domain = st.radio(
+        "자료 성격 및 질문 분야를 선택하세요:",
+        options=["부동산, 법규", "종교, 철학", "건강, 의학", "기타"],
+        index=0
+    )
 
-    if ready_items:
-        with st.spinner("자료 파싱, 이미지 최적화 및 토큰 계산 중..."):
-            contents, manifest, domain = process_file_items(ready_items)
-            if manifest:
-                st.session_state.processed_docs = contents
-                st.session_state.file_manifest = manifest
-                st.session_state.detected_domain = domain
-                st.session_state.chat_history = []
-                st.session_state.summary_result = ""
-                
-                # 사전 토큰 수 측정
-                try:
-                    tok_resp = client.models.count_tokens(model="gemini-2.5-flash", contents=contents)
-                    total_tokens = tok_resp.total_tokens
-                    if total_tokens > 950000:
-                        st.error(f"⚠️ 현재 로드된 토큰이 약 {total_tokens:,}개로 1분당 한도(100만)에 매우 근접했습니다! 파일을 분할해 분석하세요.")
-                    else:
-                        st.success(f"{len(manifest)}개 파일 로드 완료! (예상 토큰: {total_tokens:,} / 한도: 1,000,000)")
-                except Exception:
-                    st.success(f"{len(manifest)}개 파일 로드 완료!")
-            else:
-                st.warning("유효한 텍스트 또는 이미지 내용을 찾을 수 없습니다.")
+    st.divider()
+    st.header("2️⃣ 분석할 파일 업로드")
+    uploaded_files = st.file_uploader(
+        "Word, Excel, PDF, TXT, JPG 파일을 선택하거나 끌어다 놓으세요",
+        type=["txt", "md", "docx", "xlsx", "xls", "pdf", "jpg", "jpeg", "png"],
+        accept_multiple_files=True
+    )
 
-    if st.session_state.file_manifest:
-        st.divider()
-        st.markdown(f"**감지된 자료 성격**: `{st.session_state.detected_domain}`")
-        st.subheader("로드된 파일 목록")
-        for f in st.session_state.file_manifest:
-            st.caption(f"• **{f['name']}** ({f['type']}) - {f['info']}")
+    if st.button("업로드 파일 분석 준비", type="primary", use_container_width=True):
+        if uploaded_files:
+            with st.spinner("파일 파싱 및 이미지 최적화 중..."):
+                parts, count = parse_uploaded_files(uploaded_files)
+                if count > 0:
+                    st.session_state.active_contents = parts
+                    st.session_state.loaded_count = count
+                    st.session_state.chat_history = []
+                    st.session_state.summary_result = ""
+                    st.success(f"총 {count}개 파일 준비 완료!")
+                else:
+                    st.warning("유효한 텍스트나 이미지 내용을 추출할 수 있는 파일이 없습니다.")
+        else:
+            st.warning("먼저 파일을 업로드해주세요.")
 
 # --- 메인 화면 ---
-st.title("📑 스마트 문서/자료 맞춤 분석기")
+st.title("📑 문서 분석 요약 질문 by Kevin")
 
-if not st.session_state.processed_docs:
-    st.info("왼쪽 사이드바에서 [폴더 경로]를 입력하거나 [파일들]을 직접 업로드하여 시작하세요.")
+if not st.session_state.active_contents:
+    st.info("👈 왼쪽 사이드바에서 **[1. 분석 분야]**를 고르고 **[2. 파일 업로드]** 후 **[업로드 파일 분석 준비]** 버튼을 눌러주세요.")
     st.stop()
 
-st.caption(f"현재 분석 관점: **{st.session_state.detected_domain} 특화 엔진**")
+st.caption(f"현재 적용된 전문 분석 엔진: **[{selected_domain}] 특화 모드** (로드된 파일: {st.session_state.loaded_count}개)")
 
 tab1, tab2 = st.tabs(["📊 맞춤 종합 요약", "💬 심층 질의응답 (Q&A)"])
 
 # [탭 1: 종합 요약]
 with tab1:
-    if st.button("자료 성격에 맞춘 종합 요약 생성", type="primary"):
-        persona = get_domain_persona(st.session_state.detected_domain)
-        prompt = [
-            persona,
-            *st.session_state.processed_docs,
-            f"""
-            위 자료 전체를 검토하여 다음 양식에 맞추어 종합 보고서를 작성해주세요:
-            1. 자료의 주된 목적 및 핵심 배경
-            2. [{st.session_state.detected_domain}] 관점에서 가장 중요한 핵심 내용 및 주요 수치/조항/메시지
-            3. 문서 및 이미지별 세부 요약과 참조 출처(파일명 명시)
-            4. 향후 검토나 주의가 필요한 사항
-            """
+    if st.button(f"[{selected_domain}] 관점으로 종합 요약 생성", type="primary"):
+        expert_role, summary_guide = get_domain_config(selected_domain)
+        prompt_contents = [
+            *st.session_state.active_contents,
+            f"\n\n{summary_guide}"
         ]
-        with st.spinner("요약 생성 중 (토큰 한도 초과 시 자동 대기 후 재시도)..."):
-            resp_text = call_gemini_with_retry(model="gemini-2.5-flash", contents=prompt)
+        with st.spinner(f"[{selected_domain}] 전문가 관점으로 정밀 요약 보고서를 작성 중입니다..."):
+            resp_text = call_gemini_with_retry(
+                model="gemini-2.5-flash",
+                system_instruction=expert_role,
+                contents=prompt_contents
+            )
             if resp_text:
                 st.session_state.summary_result = resp_text
 
@@ -310,7 +329,7 @@ with tab1:
         st.download_button(
             label="요약 보고서 다운로드 (.md)",
             data=st.session_state.summary_result,
-            file_name=f"summary_{st.session_state.detected_domain.split()[0]}.md",
+            file_name=f"summary_{selected_domain.replace(', ', '_')}.md",
             mime="text/markdown"
         )
 
@@ -320,36 +339,27 @@ with tab2:
         with st.chat_message(chat["role"]):
             st.markdown(chat["content"])
 
-    if query := st.chat_input("문서 내용에 관해 질문하세요 (예: 특정 조항, 수치, 교훈, 증상 등)"):
+    if query := st.chat_input(f"[{selected_domain}] 자료 내용이나 관련 지식을 자유롭게 질문하세요..."):
         st.session_state.chat_history.append({"role": "user", "content": query})
         with st.chat_message("user"):
             st.markdown(query)
 
-        persona = get_domain_persona(st.session_state.detected_domain)
-        qa_instruction = (
-            f"{persona}\n"
-            "반드시 제공된 문서 및 이미지 내용에만 근거하여 답변하세요. "
-            "추측은 배제하고 각 핵심 답변마다 [출처: 파일명]을 명시하세요. 근거가 없으면 명시적으로 찾을 수 없다고 답변하세요."
-        )
-        qa_contents = [
-            qa_instruction,
-            *st.session_state.processed_docs,
-            f"\n\n질문: {query}"
-        ]
-        
         with st.chat_message("assistant"):
-            with st.spinner("답변 작성 중..."):
-                ans = call_gemini_with_retry(model="gemini-2.5-flash", contents=qa_contents)
-                if ans:
-                    st.markdown(ans)
-                    st.session_state.chat_history.append({"role": "assistant", "content": ans})
+            with st.spinner("자료 검색 및 AI 전문 지식 분석 중..."):
+                ans = generate_hybrid_answer(
+                    domain=selected_domain,
+                    active_contents=st.session_state.active_contents,
+                    query=query
+                )
+                st.markdown(ans)
+                st.session_state.chat_history.append({"role": "assistant", "content": ans})
 
 # --- 사이드바 하단: Q&A 로그 다운로드 ---
 if st.session_state.chat_history:
     with st.sidebar:
         st.divider()
         st.write("### 💾 질의응답 기록 저장")
-        log_text = [f"=== 문서 분석 Q&A 로그 (분야: {st.session_state.detected_domain}) ===\n\n"]
+        log_text = [f"=== 문서 분석 Q&A 로그 (분야: {selected_domain}) ===\n\n"]
         for c in st.session_state.chat_history:
             speaker = "사용자" if c["role"] == "user" else "Gemini 답변"
             log_text.append(f"[{speaker}]\n{c['content']}\n\n" + "-"*40 + "\n\n")
@@ -357,7 +367,7 @@ if st.session_state.chat_history:
         st.download_button(
             label="Q&A 대화 내역 다운로드 (.txt)",
             data="".join(log_text),
-            file_name=f"qa_log_{st.session_state.detected_domain.split()[0]}.txt",
+            file_name=f"qa_log_{selected_domain.replace(', ', '_')}.txt",
             mime="text/plain",
             use_container_width=True
         )
