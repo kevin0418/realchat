@@ -13,11 +13,12 @@ from google.genai.errors import ClientError
 st.set_page_config(page_title="스마트 다중 포맷 문서 분석 & Q&A", layout="wide")
 
 # 1. API 키 설정
-api_key = os.getenv("GEMINI_API_KEY") or st.secrets.get("GEMINI_API_KEY")
-if not api_key:
-    st.error("GEMINI_API_KEY가 설정되지 않았습니다. .env 또는 Streamlit secrets를 확인해주세요.")
-    st.stop()
 
+if "GEMINI_API_KEY" in st.secrets:
+    api_key = st.secrets["GEMINI_API_KEY"]
+else:
+    api_key = os.getenv("GEMINI_API_KEY")
+    
 client = genai.Client(api_key=api_key)
 
 # 세션 상태 초기화
